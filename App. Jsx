@@ -1,0 +1,564 @@
+import React, { useState, useEffect, useRef } from "react";
+import { auth, db } from "./firebase";
+import {
+  signInWithEmailAndPassword,
+  createUserWithEmailAndPassword,
+  signOut,
+  onAuthStateChanged
+} from "firebase/auth";
+import {
+  doc,
+  setDoc,
+  getDoc,
+  updateDoc,
+  collection,
+  addDoc,
+  onSnapshot,
+  query,
+  orderBy,
+  where,
+  runTransaction
+} from "firebase/firestore";
+
+// CatchMoney High-Return Plans Reference
+const INVESTMENT_PACKAGES = [
+  { id: 1, name: "Wealth Growth Plan #1", price: 300, dailyReturn: 105, duration: 10 },
+  { id: 2, name: "Elite Capital Plan #2", price: 1000, dailyReturn: 350, duration: 10 },
+  { id: 3, name: "Pro Trader Plan #3", price: 3000, dailyReturn: 1050, duration: 10 },
+  { id: 4, name: "Catch Money Ultimate #4", price: 10000, dailyReturn: 3500, duration: 10 }
+];
+
+export default function App() {
+  const [currentUser, setCurrentUser] = useState(null);
+  const [userProfile, setUserProfile] = useState(null);
+  const [allTransactions, setAllTransactions] = useState([]);
+  const [userTransactions, setUserTransactions] = useState([]);
+  const [chatMessages, setChatMessages] = useState([]);
+  const [allChatMessagesForAdmin, setAllChatMessagesForAdmin] = useState([]);
+  
+  // UI states
+  const [authEmail, setAuthEmail] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authName, setAuthName] = useState("");
+  const [isRegistering, setIsRegistering] = useState(false);
+  const [activeTab, setActiveTab] = useState("HOME");
+  const [errorMessage, setErrorMessage] = useState("");
+  const [successMessage, setSuccessMessage] = useState("");
+
+  // Transaction Inputs
+  const [depositAmount, setDepositAmount] = useState("");
+  const [depositMethod, setDepositMethod] = useState("EasyPaisa");
+  const [depositSyncCode, setDepositSyncCode] = useState("");
+  const [withdrawAmount, setWithdrawAmount] = useState("");
+  const [withdrawMethod, setWithdrawMethod] = useState("EasyPaisa");
+  const [withdrawAccount, setWithdrawAccount] = useState("");
+  const [withdrawName, setWithdrawName] = useState("");
+
+  // Live Chat
+  const [chatInput, setChatInput] = useState("");
+  const [selectedAdminChatUserId, setSelectedAdminChatUserId] = useState(null);
+  const [selectedAdminChatUserName, setSelectedAdminChatUserName] = useState("");
+
+  // Graceful Offline Mode Fallback
+  const [isOfflineMode, setIsOfflineMode] = useState(false);
+  
+  // Dummy Local States (Triggers if Firebase configurations are uninitialized)
+  const [mockProfile, setMockProfile] = useState({
+    id: "mock_user_123", name: "Demo Account", email: "user@demo.com", role: "User", balance: 5000, referralCode: "CATCH500"
+  });
+  const [mockTransactions, setMockTransactions] = useState([
+    { id: "tx_1", userId: "mock_user_123", userName: "Demo Account", userEmail: "user@demo.com", type: "DEPOSIT", amount: 1500, method: "EasyPaisa", status: "APPROVED", timestamp: Date.now() - 36000000 },
+    { id: "tx_2", userId: "mock_user_123", userName: "Demo Account", userEmail: "user@demo.com", type: "WITHDRAWAL", amount: 500, method: "JazzCash", status: "PENDING", timestamp: Date.now() - 10000000 }
+  ]);
+  const [mockChats, setMockChats] = useState([
+    { id: "ch_1", senderId: "admin", senderName: "Support Admin", senderRole: "Admin", recipientId: "mock_user_123", messageText: "Welcome! Paste your Sync Code or drop an inquiry here.", timestamp: Date.now() - 5000000 }
+  ]);
+
+  useEffect(() => {
+    if (auth.app.options.apiKey === "YOUR_API_KEY_HERE" || !auth.app.options.apiKey) {
+      setIsOfflineMode(true);
+      console.warn("Firebase configurations uninitialized. Activating safe interactive offline preview!");
+    } else {
+      setIsOfflineMode(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (isOfflineMode) {
+      setCurrentUser({ uid: "mock_user_123", email: "user@demo.com" });
+      setUserProfile(mockProfile);
+      setUserTransactions(mockTransactions);
+      setAllTransactions(mockTransactions);
+      setChatMessages(mockChats);
+      return;
+    }
+
+    const unsubscribeAuth = onAuthStateChanged(auth, (user) => {
+      if (user) {
+        setCurrentUser(user);
+        
+        // Listen to User Profile updates
+        const profileRef = doc(db, "users", user.uid);
+        const unsubProfile = onSnapshot(profileRef, (docSnap) => {
+          if (docSnap.exists()) {
+            const data = docSnap.data();
+            const isAdminEmail = user.email === "muhammad352595@gmail.com" || user.email === "admin@catchmoney.com";
+            const updatedProfile = {
+              ...data,
+              role: isAdminEmail ? "Admin" : (data.role || "User")
+            };
+            setUserProfile(updatedProfile);
+          } else {
+            const isAdminEmail = user.email === "muhammad352595@gmail.com" || user.email === "admin@catchmoney.com";
+            const newProfile = {
+              id: user.uid,
+              name: user.displayName || user.email.split("@")[0],
+              email: user.email,
+              role: isAdminEmail ? "Admin" : "User",
+              balance: 0,
+              referralCode: "CATCH" + Math.floor(1000 + Math.random() * 9000),
+              contactPreference: "Email",
+              contactPhone: ""
+            };
+            setDoc(profileRef, newProfile);
+            setUserProfile(newProfile);
+          }
+        });
+
+        // Listen to User Transactions
+        const txQuery = query(collection(db, "transactions"), orderBy("timestamp", "desc"));
+        const unsubTx = onSnapshot(txQuery, (querySnapshot) => {
+          const list = [];
+          querySnapshot.forEach((d) => {
+            list.push({ id: d.id, ...d.data() });
+          });
+          setAllTransactions(list);
+          setUserTransactions(list.filter(t => t.userId === user.uid));
+        });
+
+        // Listen to Support Chat Messages
+        const chatQuery = query(collection(db, "chat_messages"), orderBy("timestamp", "asc"));
+        const unsubChat = onSnapshot(chatQuery, (querySnapshot) => {
+          const allMsgs = [];
+          querySnapshot.forEach((d) => {
+            allMsgs.push({ id: d.id, ...d.data() });
+          });
+          setAllChatMessagesForAdmin(allMsgs);
+          setChatMessages(allMsgs.filter(m => m.senderId === user.uid || m.recipientId === user.uid || m.recipientId === "all"));
+        });
+
+        return () => {
+          unsubProfile();
+          unsubTx();
+          unsubChat();
+        };
+      } else {
+        setCurrentUser(null);
+        setUserProfile(null);
+        setUserTransactions([]);
+        setAllTransactions([]);
+        setChatMessages([]);
+      }
+    });
+
+    return () => unsubscribeAuth();
+  }, [isOfflineMode]);
+
+  // Auth Submit Handlers
+  const handleAuth = async (e) => {
+    e.preventDefault();
+    setErrorMessage("");
+    setSuccessMessage("");
+    if (!authEmail || !authPassword) {
+      setErrorMessage("Please fill in email and password.");
+      return;
+    }
+
+    if (isOfflineMode) {
+      const isAdminEmail = authEmail === "muhammad352595@gmail.com" || authEmail === "admin@catchmoney.com";
+      const userObj = {
+        id: "mock_user_123",
+        name: authName || "Demo User",
+        email: authEmail,
+        role: isAdminEmail ? "Admin" : "User",
+        balance: isAdminEmail ? 999999 : 5000,
+        referralCode: "CATCH500"
+      };
+      setMockProfile(userObj);
+      setUserProfile(userObj);
+      setCurrentUser({ uid: "mock_user_123", email: authEmail });
+      setSuccessMessage("Logged in (Demo Mode) successfully!");
+      return;
+    }
+
+    try {
+      if (isRegistering) {
+        if (!authName) {
+          setErrorMessage("Name is required to register.");
+          return;
+        }
+        const userCred = await createUserWithEmailAndPassword(auth, authEmail, authPassword);
+        const isAdminEmail = authEmail === "muhammad352595@gmail.com" || authEmail === "admin@catchmoney.com";
+        const newProfile = {
+          id: userCred.user.uid,
+          name: authName,
+          email: authEmail,
+          role: isAdminEmail ? "Admin" : "User",
+          balance: 0,
+          referralCode: "CATCH" + Math.floor(1000 + Math.random() * 9000),
+          contactPreference: "Email",
+          contactPhone: ""
+        };
+        await setDoc(doc(db, "users", userCred.user.uid), newProfile);
+        setSuccessMessage("Registered account successfully!");
+      } else {
+        await signInWithEmailAndPassword(auth, authEmail, authPassword);
+        setSuccessMessage("Welcome back to CatchMoney!");
+      }
+    } catch (err) {
+      setErrorMessage(err.message);
+    }
+  };
+
+  const handleLogout = () => {
+    if (isOfflineMode) {
+      setCurrentUser(null);
+      setUserProfile(null);
+      return;
+    }
+    signOut(auth);
+  };
+
+  // Submit Deposit (Pending state in Firestore)
+  const handleDepositSubmit = async (e) => {
+    e.preventDefault();
+    setErrorMessage("");
+    setSuccessMessage("");
+    const amount = parseFloat(depositAmount);
+    if (!amount || amount <= 0) {
+      setErrorMessage("Please enter a valid deposit amount.");
+      return;
+    }
+    if (!depositSyncCode) {
+      setErrorMessage("Please enter the EasyPaisa/JazzCash Sync Code.");
+      return;
+    }
+
+    const txData = {
+      userId: currentUser.uid,
+      userName: userProfile.name,
+      userEmail: userProfile.email,
+      type: "DEPOSIT",
+      amount: amount,
+      method: depositMethod,
+      screenshotPath: `Sync Code: ${depositSyncCode}`,
+      status: "PENDING",
+      timestamp: Date.now()
+    };
+
+    if (isOfflineMode) {
+      const newTx = { id: "tx_" + Date.now(), ...txData };
+      setMockTransactions([newTx, ...mockTransactions]);
+      setDepositAmount("");
+      setDepositSyncCode("");
+      setSuccessMessage("Deposit request submitted successfully (Demo Mode)!");
+      return;
+    }
+
+    try {
+      await addDoc(collection(db, "transactions"), txData);
+      setDepositAmount("");
+      setDepositSyncCode("");
+      setSuccessMessage("Deposit submitted! Admin will verify and approve shortly.");
+    } catch (err) {
+      setErrorMessage(err.message);
+    }
+  };
+
+  // Submit Cashout (Deducts balance, adds Pending transaction)
+  const handleWithdrawSubmit = async (e) => {
+    e.preventDefault();
+    setErrorMessage("");
+    setSuccessMessage("");
+    const amount = parseFloat(withdrawAmount);
+    if (!amount || amount <= 0) {
+      setErrorMessage("Please enter a valid withdrawal amount.");
+      return;
+    }
+    if (amount > userProfile.balance) {
+      setErrorMessage("Insufficient wallet balance.");
+      return;
+    }
+    if (!withdrawAccount || !withdrawName) {
+      setErrorMessage("Please provide receiving account credentials.");
+      return;
+    }
+
+    const txData = {
+      userId: currentUser.uid,
+      userName: userProfile.name,
+      userEmail: userProfile.email,
+      type: "WITHDRAWAL",
+      amount: amount,
+      method: `${withdrawMethod} (${withdrawAccount} - ${withdrawName})`,
+      screenshotPath: "Pending Admin Payout",
+      status: "PENDING",
+      timestamp: Date.now()
+    };
+
+    if (isOfflineMode) {
+      const updatedProfile = { ...userProfile, balance: userProfile.balance - amount };
+      setMockProfile(updatedProfile);
+      setUserProfile(updatedProfile);
+      
+      const newTx = { id: "tx_" + Date.now(), ...txData };
+      setMockTransactions([newTx, ...mockTransactions]);
+      setWithdrawAmount("");
+      setWithdrawAccount("");
+      setWithdrawName("");
+      setSuccessMessage("Withdrawal requested successfully (Demo Mode)!");
+      return;
+    }
+
+    try {
+      await runTransaction(db, async (transaction) => {
+        const userDocRef = doc(db, "users", currentUser.uid);
+        const userSnapshot = await transaction.get(userDocRef);
+        if (!userSnapshot.exists()) throw new Error("User document does not exist!");
+        
+        const currentBalance = userSnapshot.data().balance || 0;
+        if (currentBalance < amount) throw new Error("Insufficient wallet balance!");
+
+        transaction.update(userDocRef, { balance: currentBalance - amount });
+        
+        const txDocRef = doc(collection(db, "transactions"));
+        transaction.set(txDocRef, txData);
+      });
+
+      setWithdrawAmount("");
+      setWithdrawAccount("");
+      setWithdrawName("");
+      setSuccessMessage("Withdrawal request filed! Admin will process payout shortly.");
+    } catch (err) {
+      setErrorMessage(err.message);
+    }
+  };
+
+  // Purchase high return investment package
+  const handlePurchasePackage = async (pkg) => {
+    setErrorMessage("");
+    setSuccessMessage("");
+    if (userProfile.balance < pkg.price) {
+      setErrorMessage(`Insufficient balance. Please deposit at least PKR ${pkg.price}.`);
+      return;
+    }
+
+    if (isOfflineMode) {
+      const updatedProfile = { ...userProfile, balance: userProfile.balance - pkg.price };
+      setMockProfile(updatedProfile);
+      setUserProfile(updatedProfile);
+      
+      const purchaseTx = {
+        id: "tx_buy_" + Date.now(),
+        userId: currentUser.uid,
+        userName: userProfile.name,
+        userEmail: userProfile.email,
+        type: "INVESTMENT_PURCHASE",
+        amount: pkg.price,
+        method: pkg.name,
+        status: "APPROVED",
+        timestamp: Date.now()
+      };
+      setMockTransactions([purchaseTx, ...mockTransactions]);
+      setSuccessMessage(`Successfully invested in ${pkg.name}! Returns started.`);
+      return;
+    }
+
+    try {
+      await runTransaction(db, async (transaction) => {
+        const userDocRef = doc(db, "users", currentUser.uid);
+        const userSnapshot = await transaction.get(userDocRef);
+        if (!userSnapshot.exists()) throw new Error("Profile not found.");
+
+        const currentBalance = userSnapshot.data().balance || 0;
+        if (currentBalance < pkg.price) throw new Error("Insufficient balance.");
+
+        transaction.update(userDocRef, { balance: currentBalance - pkg.price });
+
+        const investDocRef = doc(collection(db, "investments"));
+        transaction.set(investDocRef, {
+          userId: currentUser.uid,
+          packageName: pkg.name,
+          packagePrice: pkg.price,
+          dailyReturn: pkg.dailyReturn,
+          purchaseTimestamp: Date.now(),
+          isCompleted: false,
+          claimed: false
+        });
+
+        const ledgerDocRef = doc(collection(db, "transactions"));
+        transaction.set(ledgerDocRef, {
+          userId: currentUser.uid,
+          userName: userProfile.name,
+          userEmail: userProfile.email,
+          type: "INVEST_DEBIT",
+          amount: pkg.price,
+          method: pkg.name,
+          status: "APPROVED",
+          timestamp: Date.now()
+        });
+      });
+
+      setSuccessMessage(`Successfully purchased ${pkg.name}! Returns of PKR ${pkg.dailyReturn} daily started.`);
+    } catch (err) {
+      setErrorMessage(err.message);
+    }
+  };
+
+  // Chat Submission
+  const handleSendChat = async (e) => {
+    e.preventDefault();
+    if (!chatInput.trim()) return;
+
+    const chatMsg = {
+      senderId: currentUser.uid,
+      senderName: userProfile.name,
+      senderRole: userProfile.role,
+      recipientId: userProfile.role === "Admin" ? (selectedAdminChatUserId || "all") : "admin",
+      messageText: chatInput.trim(),
+      timestamp: Date.now(),
+      isRead: false
+    };
+
+    if (isOfflineMode) {
+      const newMsg = { id: "ch_" + Date.now(), ...chatMsg };
+      setMockChats([...mockChats, newMsg]);
+      setChatInput("");
+      
+      if (userProfile.role !== "Admin") {
+        setTimeout(() => {
+          setMockChats(prev => [...prev, {
+            id: "ch_reply_" + Date.now(),
+            senderId: "admin",
+            senderName: "Support Admin",
+            senderRole: "Admin",
+            recipientId: "mock_user_123",
+            messageText: `Thanks! Received your request. Admin will reply soon!`,
+            timestamp: Date.now()
+          }]);
+        }, 1200);
+      }
+      return;
+    }
+
+    try {
+      await addDoc(collection(db, "chat_messages"), chatMsg);
+      setChatInput("");
+    } catch (err) {
+      setErrorMessage(err.message);
+    }
+  };
+
+  // Admin Approval: Increments balance in Firestore atomic transaction
+  const handleAdminApprove = async (tx) => {
+    setErrorMessage("");
+    setSuccessMessage("");
+
+    if (isOfflineMode) {
+      const updatedTxs = mockTransactions.map(t => t.id === tx.id ? { ...t, status: "APPROVED" } : t);
+      setMockTransactions(updatedTxs);
+      setAllTransactions(updatedTxs);
+
+      if (tx.type === "DEPOSIT") {
+        const updatedProfile = { ...userProfile, balance: userProfile.balance + tx.amount };
+        setMockProfile(updatedProfile);
+        setUserProfile(updatedProfile);
+      }
+      setSuccessMessage("Approved deposit request (Demo Mode) successfully!");
+      return;
+    }
+
+    try {
+      await runTransaction(db, async (transaction) => {
+        const txDocRef = doc(db, "transactions", tx.id);
+        const txSnap = await transaction.get(txDocRef);
+        if (!txSnap.exists()) throw new Error("Transaction does not exist");
+        if (txSnap.data().status !== "PENDING") throw new Error("Transaction already processed");
+
+        transaction.update(txDocRef, { status: "APPROVED" });
+
+        if (tx.type === "DEPOSIT") {
+          const userDocRef = doc(db, "users", tx.userId);
+          const userSnap = await transaction.get(userDocRef);
+          if (userSnap.exists()) {
+            const currentBal = userSnap.data().balance || 0;
+            transaction.update(userDocRef, { balance: currentBal + tx.amount });
+          }
+        }
+      });
+      setSuccessMessage(`Transaction of PKR ${tx.amount} approved successfully!`);
+    } catch (err) {
+      setErrorMessage(err.message);
+    }
+  };
+
+  // Admin Rejection: Refunds frozen amount if withdrawal
+  const handleAdminReject = async (tx) => {
+    setErrorMessage("");
+    setSuccessMessage("");
+
+    if (isOfflineMode) {
+      const updatedTxs = mockTransactions.map(t => t.id === tx.id ? { ...t, status: "REJECTED" } : t);
+      setMockTransactions(updatedTxs);
+      setAllTransactions(updatedTxs);
+
+      if (tx.type === "WITHDRAWAL") {
+        const updatedProfile = { ...userProfile, balance: userProfile.balance + tx.amount };
+        setMockProfile(updatedProfile);
+        setUserProfile(updatedProfile);
+      }
+      setSuccessMessage("Rejected withdrawal request (Demo Mode) and refunded user.");
+      return;
+    }
+
+    try {
+      await runTransaction(db, async (transaction) => {
+        const txDocRef = doc(db, "transactions", tx.id);
+        const txSnap = await transaction.get(txDocRef);
+        if (!txSnap.exists()) throw new Error("Transaction does not exist");
+        if (txSnap.data().status !== "PENDING") throw new Error("Transaction already processed");
+
+        transaction.update(txDocRef, { status: "REJECTED" });
+
+        if (tx.type === "WITHDRAWAL") {
+          const userDocRef = doc(db, "users", tx.userId);
+          const userSnap = await transaction.get(userDocRef);
+          if (userSnap.exists()) {
+            const currentBal = userSnap.data().balance || 0;
+            transaction.update(userDocRef, { balance: currentBal + tx.amount });
+          }
+        }
+      });
+      setSuccessMessage(`Transaction of PKR ${tx.amount} rejected. Funds refunded.`);
+    } catch (err) {
+      setErrorMessage(err.message);
+    }
+  };
+
+  // Group unique chats for Admin Support Panel
+  const activeUserChatsForAdmin = React.useMemo(() => {
+    const list = [];
+    const ids = new Set();
+    allChatMessagesForAdmin.forEach(msg => {
+      if (msg.senderRole !== "Admin" && !ids.has(msg.senderId)) {
+        ids.add(msg.senderId);
+        list.push({ id: msg.senderId, name: msg.senderName });
+      }
+    });
+    return list;
+  }, [allChatMessagesForAdmin]);
+
+  useEffect(() => {
+    if (userProfile?.role === "Admin" && activeUserChatsForAdmin.length > 0 && !selectedAdminChatUserId) {
+      setSelectedAdminChatUserId(activeUserChatsForAdmin[0].id);
+      setSelectedAdminChatUserN
